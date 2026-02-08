@@ -1,49 +1,68 @@
 extends Node3D
 
-## 3D Parkour — fully procedural scene
-## Attach to a root Node3D named "Main"
-## All nodes are created in code — no manual scene tree needed.
+## Auto-run 3D Parkour — fully procedural
+## Player runs forward (-Z) automatically; A/D to dodge, Space to jump.
+## Hit an obstacle or fall off → Game Over → press R to restart.
 
 # ───────── tunables ─────────
-const PLAYER_SPEED       := 8.0
-const JUMP_VELOCITY      := 7.0
-const GRAVITY            := 20.0
-const MOUSE_SENSITIVITY  := 0.002
-const PITCH_MIN_DEG      := -50.0
-const PITCH_MAX_DEG      := 30.0
-const SPRING_LENGTH      := 6.0
-const SPAWN_INTERVAL     := 1.0
-const FALL_LIMIT         := -10.0
+const RUN_SPEED       := 14.0     # auto-forward speed
+const STRAFE_SPEED    := 10.0     # A/D lateral speed
+const JUMP_VELOCITY   := 7.0
+const GRAVITY         := 20.0
+const SPRING_LENGTH   := 8.0      # camera distance
+const CAM_PITCH_DEG   := -15.0    # camera angle (negative = above & behind)
+
+const SPAWN_HORIZON   := 60.0     # pre-fill obstacles this far ahead
+const SPAWN_Z_GAP_MIN := 8.0      # min Z gap between consecutive obstacles
+const SPAWN_Z_GAP_MAX := 12.0     # max Z gap
+const SPAWN_X_RANGE   := 4.0      # obstacles spawn in X ∈ [-4, +4]
+const MAX_OBSTACLES   := 10       # hard cap on simultaneous obstacles
+const CLEANUP_BEHIND  := 40.0     # destroy obstacles this far behind player
+
+const FALL_LIMIT      := -10.0    # Y below which player is considered dead
 
 # ───────── runtime refs ─────────
 var player     : CharacterBody3D
 var camera_rig : Node3D
 var spring_arm : SpringArm3D
+var ground     : StaticBody3D
 
-# ══════════════════════════════════════
+# ───────── obstacle state ─────────
+var next_spawn_z : float = 0.0    # Z of the next obstacle to create
+
+# ───────── UI refs ─────────
+var score_label    : Label
+var gameover_label : Label
+
+# ───────── game state ─────────
+var game_over  : bool  = false
+var score_time : float = 0.0
+
+# ══════════════════════════════════════════════════════════════
 #  Lifecycle
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 func _ready() -> void:
 	_register_actions()
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 
 	_build_environment()
 	_build_ground()
 	_build_player()
 	_build_camera_rig()
-	_build_obstacle_spawner()
+	_build_ui()
 
-# ══════════════════════════════════════
-#  Input-action registration (no manual InputMap needed)
-# ══════════════════════════════════════
+	# First obstacle row starts 20 m ahead of the player
+	next_spawn_z = player.global_position.z - 20.0
+
+# ══════════════════════════════════════════════════════════════
+#  Input-action registration  (zero manual InputMap setup)
+# ══════════════════════════════════════════════════════════════
 
 func _register_actions() -> void:
-	_add_key_action("move_forward", KEY_W)
-	_add_key_action("move_back",    KEY_S)
-	_add_key_action("move_left",    KEY_A)
-	_add_key_action("move_right",   KEY_D)
-	_add_key_action("jump",         KEY_SPACE)
+	_add_key_action("move_left",  KEY_A)
+	_add_key_action("move_right", KEY_D)
+	_add_key_action("jump",       KEY_SPACE)
+	_add_key_action("restart",    KEY_R)
 
 func _add_key_action(action_name: String, keycode: Key) -> void:
 	if not InputMap.has_action(action_name):
@@ -52,63 +71,61 @@ func _add_key_action(action_name: String, keycode: Key) -> void:
 		ev.keycode = keycode
 		InputMap.action_add_event(action_name, ev)
 
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 #  Scene builders
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 func _build_environment() -> void:
-	# Directional light (sun)
+	# Sun
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-45, -30, 0)
 	sun.shadow_enabled   = true
 	sun.light_energy     = 1.2
 	add_child(sun)
 
-	# Sky / ambient
+	# Sky colour + ambient
 	var we  := WorldEnvironment.new()
 	var env := Environment.new()
-	env.background_mode        = Environment.BG_COLOR
-	env.background_color       = Color(0.45, 0.65, 0.95)
-	env.ambient_light_source   = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color    = Color.WHITE
-	env.ambient_light_energy   = 0.4
+	env.background_mode      = Environment.BG_COLOR
+	env.background_color     = Color(0.45, 0.65, 0.95)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color  = Color.WHITE
+	env.ambient_light_energy = 0.4
 	we.environment = env
 	add_child(we)
 
 
 func _build_ground() -> void:
-	# Collision layer 1 = ground
-	var body := StaticBody3D.new()
-	body.name            = "Ground"
-	body.collision_layer = 1
-	body.collision_mask  = 0
-	add_child(body)
+	ground = StaticBody3D.new()
+	ground.name            = "Ground"
+	ground.collision_layer = 1        # layer 1
+	ground.collision_mask  = 0
+	add_child(ground)
 
+	# 30 wide × 200 long track — follows player Z every frame
 	var mi   := MeshInstance3D.new()
 	var mesh := BoxMesh.new()
-	mesh.size = Vector3(200, 1, 200)
+	mesh.size = Vector3(30, 1, 200)
 	mi.mesh   = mesh
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.25, 0.65, 0.3)
 	mi.material_override = mat
-	body.add_child(mi)
+	ground.add_child(mi)
 
 	var cs    := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
-	shape.size = Vector3(200, 1, 200)
+	shape.size = Vector3(30, 1, 200)
 	cs.shape   = shape
-	body.add_child(cs)
+	ground.add_child(cs)
 
-	# Surface at y = 0 (box center at -0.5)
-	body.position.y = -0.5
+	ground.position.y = -0.5          # surface at Y = 0
 
 
 func _build_player() -> void:
-	# Collision layer 2 = player,  mask = ground(1) | obstacles(4)
 	player = CharacterBody3D.new()
 	player.name            = "Player"
-	player.collision_layer = 2
-	player.collision_mask  = 1 | 4
+	player.collision_layer = 2        # layer 2
+	player.collision_mask  = 1 | 4    # ground (1) + obstacles (4)
 	add_child(player)
 	player.position = Vector3(0, 1, 0)
 
@@ -136,9 +153,10 @@ func _build_camera_rig() -> void:
 	add_child(camera_rig)
 
 	spring_arm = SpringArm3D.new()
-	spring_arm.name           = "SpringArm"
-	spring_arm.spring_length  = SPRING_LENGTH
-	spring_arm.collision_mask = 1          # only bounce off ground
+	spring_arm.name               = "SpringArm"
+	spring_arm.spring_length      = SPRING_LENGTH
+	spring_arm.collision_mask     = 1     # only collide with ground
+	spring_arm.rotation_degrees.x = CAM_PITCH_DEG  # fixed behind & above
 	camera_rig.add_child(spring_arm)
 
 	var cam := Camera3D.new()
@@ -147,44 +165,65 @@ func _build_camera_rig() -> void:
 	spring_arm.add_child(cam)
 
 
-func _build_obstacle_spawner() -> void:
-	var timer := Timer.new()
-	timer.name      = "ObstacleSpawner"
-	timer.wait_time = SPAWN_INTERVAL
-	timer.autostart = true
-	timer.timeout.connect(_spawn_obstacle)
-	add_child(timer)
+func _build_ui() -> void:
+	var canvas := CanvasLayer.new()
+	canvas.name = "UI"
+	add_child(canvas)
 
-# ══════════════════════════════════════
-#  Obstacle factory
-# ══════════════════════════════════════
+	# ── Score / survival timer (top-left) ──
+	score_label = Label.new()
+	score_label.name     = "ScoreLabel"
+	score_label.text     = "Time: 0.0"
+	score_label.position = Vector2(20, 20)
+	score_label.add_theme_font_size_override("font_size", 28)
+	score_label.add_theme_color_override("font_color", Color.WHITE)
+	score_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	score_label.add_theme_constant_override("shadow_offset_x", 2)
+	score_label.add_theme_constant_override("shadow_offset_y", 2)
+	canvas.add_child(score_label)
 
-func _spawn_obstacle() -> void:
-	if player == null:
-		return
+	# ── Game Over overlay (centered, hidden by default) ──
+	gameover_label = Label.new()
+	gameover_label.name = "GameOverLabel"
+	gameover_label.text = "GAME OVER\nPress  R  to restart"
+	gameover_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	gameover_label.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+	gameover_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	gameover_label.add_theme_font_size_override("font_size", 48)
+	gameover_label.add_theme_color_override("font_color", Color(1.0, 0.2, 0.2))
+	gameover_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	gameover_label.add_theme_constant_override("shadow_offset_x", 3)
+	gameover_label.add_theme_constant_override("shadow_offset_y", 3)
+	gameover_label.visible = false
+	canvas.add_child(gameover_label)
 
-	# Collision layer 4 (= layer-3 bit) = obstacles
+# ══════════════════════════════════════════════════════════════
+#  Obstacle system  (distance-based, not timer-based)
+# ══════════════════════════════════════════════════════════════
+
+func _try_spawn_obstacles() -> void:
+	var count := get_tree().get_nodes_in_group("obstacles").size()
+
+	# Keep filling the horizon, respecting the cap
+	while next_spawn_z > player.global_position.z - SPAWN_HORIZON \
+			and count < MAX_OBSTACLES:
+		_create_obstacle(next_spawn_z)
+		next_spawn_z -= randf_range(SPAWN_Z_GAP_MIN, SPAWN_Z_GAP_MAX)
+		count += 1
+
+
+func _create_obstacle(z: float) -> void:
 	var body := StaticBody3D.new()
-	body.collision_layer = 4
+	body.collision_layer = 4          # layer 3 bit
 	body.collision_mask  = 0
 	body.add_to_group("obstacles")
 	add_child(body)
 
-	# Spawn ahead of camera forward with random lateral offset
-	var fwd := -camera_rig.global_transform.basis.z
-	fwd.y = 0.0
-	fwd   = fwd.normalized()
-	var right := camera_rig.global_transform.basis.x
-	right.y = 0.0
-	right   = right.normalized()
-
-	var dist   := randf_range(15.0, 30.0)
-	var offset := randf_range(-8.0, 8.0)
-	var half   := randf_range(0.4, 1.2)        # half-size of box
-
-	body.global_position = player.global_position \
-		+ fwd * dist + right * offset
-	body.global_position.y = half               # sit on ground surface
+	var half := randf_range(0.4, 1.2)
+	body.global_position = Vector3(
+		randf_range(-SPAWN_X_RANGE, SPAWN_X_RANGE),
+		half,                         # bottom sits on ground (Y=0)
+		z)
 
 	# Mesh
 	var side := half * 2.0
@@ -200,92 +239,95 @@ func _spawn_obstacle() -> void:
 	mi.material_override = mat
 	body.add_child(mi)
 
-	# Collision
+	# Collision shape
 	var cs    := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
 	shape.size = Vector3(side, side, side)
 	cs.shape   = shape
 	body.add_child(cs)
 
-	# Auto-free after 20 s to avoid unlimited growth
-	var ttl := Timer.new()
-	ttl.wait_time = 20.0
-	ttl.one_shot  = true
-	ttl.autostart = true
-	ttl.timeout.connect(body.queue_free)
-	body.add_child(ttl)
 
-# ══════════════════════════════════════
-#  Input handling
-# ══════════════════════════════════════
+func _cleanup_obstacles() -> void:
+	for obs in get_tree().get_nodes_in_group("obstacles"):
+		# obstacle is more than CLEANUP_BEHIND metres behind the player
+		if obs.global_position.z > player.global_position.z + CLEANUP_BEHIND:
+			obs.queue_free()
+
+# ══════════════════════════════════════════════════════════════
+#  Game state
+# ══════════════════════════════════════════════════════════════
+
+func _die() -> void:
+	game_over = true
+	gameover_label.visible = true
+	player.velocity = Vector3.ZERO
+
+# ══════════════════════════════════════════════════════════════
+#  Input
+# ══════════════════════════════════════════════════════════════
 
 func _unhandled_input(event: InputEvent) -> void:
-	# Mouse look (only while captured)
-	if event is InputEventMouseMotion \
-			and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-		camera_rig.rotate_y(-event.relative.x * MOUSE_SENSITIVITY)
-		spring_arm.rotate_x(-event.relative.y * MOUSE_SENSITIVITY)
-		spring_arm.rotation.x = clampf(
-			spring_arm.rotation.x,
-			deg_to_rad(PITCH_MIN_DEG),
-			deg_to_rad(PITCH_MAX_DEG))
+	if event.is_action_pressed("restart") and game_over:
+		get_tree().reload_current_scene()
 
-	# Esc toggles mouse capture
-	if event.is_action_pressed("ui_cancel"):
-		if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
-			Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
-		else:
-			Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-
-# ══════════════════════════════════════
-#  Physics
-# ══════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+#  Physics  (movement, collisions, obstacle management)
+# ══════════════════════════════════════════════════════════════
 
 func _physics_process(delta: float) -> void:
-	if player == null:
+	if player == null or game_over:
 		return
 
-	# ---- gravity ----
+	# ── gravity ──
 	if not player.is_on_floor():
 		player.velocity.y -= GRAVITY * delta
 
-	# ---- jump ----
+	# ── jump ──
 	if Input.is_action_just_pressed("jump") and player.is_on_floor():
 		player.velocity.y = JUMP_VELOCITY
 
-	# ---- horizontal movement (camera-relative) ----
-	var input_dir := Vector2(
-		Input.get_axis("move_left", "move_right"),
-		Input.get_axis("move_forward", "move_back"))
+	# ── auto-run forward (−Z) ──
+	player.velocity.z = -RUN_SPEED
 
-	var move_dir := camera_rig.global_transform.basis \
-		* Vector3(input_dir.x, 0.0, input_dir.y)
-	move_dir.y = 0.0
-	if move_dir.length_squared() > 0.001:
-		move_dir = move_dir.normalized()
+	# ── A/D strafe ──
+	player.velocity.x = Input.get_axis("move_left", "move_right") * STRAFE_SPEED
 
-	player.velocity.x = move_dir.x * PLAYER_SPEED
-	player.velocity.z = move_dir.z * PLAYER_SPEED
-
-	# ---- move & slide ----
+	# ── move ──
 	player.move_and_slide()
 
-	# ---- obstacle collision → restart ----
+	# ── obstacle collision → die ──
 	for i in player.get_slide_collision_count():
 		var collider := player.get_slide_collision(i).get_collider()
 		if collider and collider.is_in_group("obstacles"):
-			get_tree().reload_current_scene()
+			_die()
 			return
 
-	# ---- fell off the world → restart ----
+	# ── fell off the world → die ──
 	if player.global_position.y < FALL_LIMIT:
-		get_tree().reload_current_scene()
+		_die()
 		return
 
-# ══════════════════════════════════════
-#  Smooth camera follow (runs every render frame)
-# ══════════════════════════════════════
+	# ── obstacle lifecycle ──
+	_try_spawn_obstacles()
+	_cleanup_obstacles()
 
-func _process(_delta: float) -> void:
-	if player and camera_rig:
+# ══════════════════════════════════════════════════════════════
+#  Render frame  (camera, ground scroll, UI)
+# ══════════════════════════════════════════════════════════════
+
+func _process(delta: float) -> void:
+	if player == null:
+		return
+
+	# Camera tracks player every render frame for smoothness
+	if camera_rig:
 		camera_rig.global_position = player.global_position
+
+	# Rolling ground: keep ground centred under the player
+	if ground:
+		ground.position.z = player.global_position.z
+
+	# Score ticker
+	if not game_over:
+		score_time += delta
+		score_label.text = "Time: %.1f" % score_time
