@@ -36,6 +36,13 @@ var camera_rig   : Node3D
 var spring_arm   : SpringArm3D
 var ground       : StaticBody3D
 var pickup_timer : Timer
+var model_root      : Node3D
+var left_arm_pivot  : Node3D
+var right_arm_pivot : Node3D
+var left_leg_pivot  : Node3D
+var right_leg_pivot : Node3D
+var run_anim_phase  : float = 0.0
+var run_anim_blend  : float = 0.0
 
 # ───────── obstacle state ─────────
 var next_spawn_z : float = 0.0
@@ -138,15 +145,54 @@ func _build_player() -> void:
 	add_child(player)
 	player.position = Vector3(0, 1, 0)
 
-	var mi   := MeshInstance3D.new()
-	var mesh := CapsuleMesh.new()
-	mesh.radius = 0.35
-	mesh.height = 1.0
-	mi.mesh     = mesh
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.15, 0.35, 0.85)
-	mi.material_override = mat
-	player.add_child(mi)
+	model_root = Node3D.new()
+	model_root.name = "ModelRoot"
+	model_root.position = Vector3(0, 0.08, 0)
+	player.add_child(model_root)
+
+	var body := MeshInstance3D.new()
+	body.name = "Body"
+	var body_mesh := CapsuleMesh.new()
+	body_mesh.radius = 0.23
+	body_mesh.height = 0.60
+	body.mesh = body_mesh
+	var body_mat := StandardMaterial3D.new()
+	body_mat.albedo_color = Color(0.15, 0.35, 0.85)
+	body_mat.roughness = 0.85
+	body.material_override = body_mat
+	body.position = Vector3(0, 0.54, 0)
+	model_root.add_child(body)
+
+	var head := MeshInstance3D.new()
+	head.name = "Head"
+	var head_mesh := SphereMesh.new()
+	head_mesh.radius = 0.18
+	head_mesh.height = 0.36
+	head.mesh = head_mesh
+	var head_mat := StandardMaterial3D.new()
+	head_mat.albedo_color = Color(0.95, 0.83, 0.70)
+	head_mat.roughness = 0.95
+	head.material_override = head_mat
+	head.position = Vector3(0, 1.05, 0)
+	model_root.add_child(head)
+
+	left_arm_pivot = _create_limb_pivot("LeftArm", 0.48, 0.065, Color(0.16, 0.38, 0.92))
+	left_arm_pivot.position = Vector3(-0.30, 0.82, 0)
+	left_arm_pivot.rotation.z = -0.10
+	model_root.add_child(left_arm_pivot)
+
+	right_arm_pivot = _create_limb_pivot("RightArm", 0.48, 0.065, Color(0.16, 0.38, 0.92))
+	right_arm_pivot.position = Vector3(0.30, 0.82, 0)
+	right_arm_pivot.rotation.z = 0.10
+	model_root.add_child(right_arm_pivot)
+
+	left_leg_pivot = _create_limb_pivot("LeftLeg", 0.56, 0.08, Color(0.18, 0.22, 0.35))
+	left_leg_pivot.position = Vector3(-0.14, 0.40, 0)
+	model_root.add_child(left_leg_pivot)
+
+	right_leg_pivot = _create_limb_pivot("RightLeg", 0.56, 0.08, Color(0.18, 0.22, 0.35))
+	right_leg_pivot.position = Vector3(0.14, 0.40, 0)
+	model_root.add_child(right_leg_pivot)
 
 	var cs    := CollisionShape3D.new()
 	var shape := CapsuleShape3D.new()
@@ -154,6 +200,56 @@ func _build_player() -> void:
 	shape.height = 1.0
 	cs.shape     = shape
 	player.add_child(cs)
+
+
+func _create_limb_pivot(name: String, length: float, radius: float, color: Color) -> Node3D:
+	var pivot := Node3D.new()
+	pivot.name = name
+
+	var limb := MeshInstance3D.new()
+	var mesh := CylinderMesh.new()
+	mesh.height = length
+	mesh.top_radius = radius
+	mesh.bottom_radius = radius
+	limb.mesh = mesh
+	limb.position = Vector3(0, -length * 0.5, 0)
+
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.roughness = 0.85
+	limb.material_override = mat
+	pivot.add_child(limb)
+
+	return pivot
+
+
+func _update_player_model_animation(delta: float) -> void:
+	if model_root == null or player == null:
+		return
+
+	var planar_speed := Vector2(player.velocity.x, player.velocity.z).length()
+	var target_blend := 0.0
+	if player.is_on_floor() and planar_speed > 0.1:
+		target_blend = 1.0
+	elif not player.is_on_floor():
+		target_blend = 0.2
+
+	run_anim_blend = lerpf(run_anim_blend, target_blend, minf(1.0, delta * 10.0))
+	run_anim_phase += delta * (8.0 + planar_speed * 0.35)
+	if run_anim_phase > TAU:
+		run_anim_phase -= TAU
+
+	var arm_swing := sin(run_anim_phase) * 0.55 * run_anim_blend
+	var leg_swing := sin(run_anim_phase) * 0.45 * run_anim_blend
+
+	if left_arm_pivot:
+		left_arm_pivot.rotation.x = arm_swing
+	if right_arm_pivot:
+		right_arm_pivot.rotation.x = -arm_swing
+	if left_leg_pivot:
+		left_leg_pivot.rotation.x = -leg_swing
+	if right_leg_pivot:
+		right_leg_pivot.rotation.x = leg_swing
 
 
 func _build_camera_rig() -> void:
@@ -179,50 +275,122 @@ func _build_ui() -> void:
 	canvas.name = "UI"
 	add_child(canvas)
 
-	# ── Survival timer (top-left) ──
-	time_label = Label.new()
-	time_label.name     = "TimeLabel"
-	time_label.text     = "Time: 0.0"
-	time_label.position = Vector2(20, 20)
-	time_label.add_theme_font_size_override("font_size", 28)
-	time_label.add_theme_color_override("font_color", Color.WHITE)
-	time_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-	time_label.add_theme_constant_override("shadow_offset_x", 2)
-	time_label.add_theme_constant_override("shadow_offset_y", 2)
-	canvas.add_child(time_label)
+	var ui_root := Control.new()
+	ui_root.name = "UIRoot"
+	ui_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	ui_root.mouse_filter = Control.MOUSE_FILTER_PASS
+	canvas.add_child(ui_root)
 
-	# ── Pickup score (top-right) ──
+	# Time chip (top-left, keep existing timer label)
+	var time_card := PanelContainer.new()
+	time_card.name = "TimeCard"
+	time_card.anchor_left = 0.0
+	time_card.anchor_top = 0.0
+	time_card.anchor_right = 0.0
+	time_card.anchor_bottom = 0.0
+	time_card.offset_left = 20
+	time_card.offset_top = 20
+	time_card.offset_right = 210
+	time_card.offset_bottom = 66
+	time_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var time_style := StyleBoxFlat.new()
+	time_style.bg_color = Color(0.05, 0.08, 0.13, 0.55)
+	time_style.corner_radius_top_left = 14
+	time_style.corner_radius_top_right = 14
+	time_style.corner_radius_bottom_right = 14
+	time_style.corner_radius_bottom_left = 14
+	time_style.border_width_left = 2
+	time_style.border_width_top = 2
+	time_style.border_width_right = 2
+	time_style.border_width_bottom = 2
+	time_style.border_color = Color(0.75, 0.88, 1.0, 0.5)
+	time_style.shadow_color = Color(0, 0, 0, 0.45)
+	time_style.shadow_size = 6
+	time_style.shadow_offset = Vector2(0, 3)
+	time_card.add_theme_stylebox_override("panel", time_style)
+	ui_root.add_child(time_card)
+
+	var time_margin := MarginContainer.new()
+	time_margin.add_theme_constant_override("margin_left", 12)
+	time_margin.add_theme_constant_override("margin_top", 6)
+	time_margin.add_theme_constant_override("margin_right", 12)
+	time_margin.add_theme_constant_override("margin_bottom", 6)
+	time_card.add_child(time_margin)
+
+	time_label = Label.new()
+	time_label.name = "TimeLabel"
+	time_label.text = "Time: 0.0"
+	time_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	time_label.add_theme_font_size_override("font_size", 24)
+	time_label.add_theme_color_override("font_color", Color(0.9, 0.98, 1.0))
+	time_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
+	time_label.add_theme_constant_override("shadow_offset_x", 1)
+	time_label.add_theme_constant_override("shadow_offset_y", 1)
+	time_margin.add_child(time_label)
+
+	# Score card (top-right)
+	var score_card := PanelContainer.new()
+	score_card.name = "ScoreCard"
+	score_card.anchor_left = 1.0
+	score_card.anchor_top = 0.0
+	score_card.anchor_right = 1.0
+	score_card.anchor_bottom = 0.0
+	score_card.offset_left = -300
+	score_card.offset_top = 20
+	score_card.offset_right = -20
+	score_card.offset_bottom = 86
+	score_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
+
+	var score_style := StyleBoxFlat.new()
+	score_style.bg_color = Color(0.07, 0.1, 0.16, 0.62)
+	score_style.corner_radius_top_left = 18
+	score_style.corner_radius_top_right = 18
+	score_style.corner_radius_bottom_right = 18
+	score_style.corner_radius_bottom_left = 18
+	score_style.border_width_left = 2
+	score_style.border_width_top = 2
+	score_style.border_width_right = 2
+	score_style.border_width_bottom = 2
+	score_style.border_color = Color(1.0, 0.92, 0.55, 0.75)
+	score_style.shadow_color = Color(0, 0, 0, 0.5)
+	score_style.shadow_size = 9
+	score_style.shadow_offset = Vector2(0, 4)
+	score_card.add_theme_stylebox_override("panel", score_style)
+	ui_root.add_child(score_card)
+
+	var score_margin := MarginContainer.new()
+	score_margin.add_theme_constant_override("margin_left", 18)
+	score_margin.add_theme_constant_override("margin_top", 8)
+	score_margin.add_theme_constant_override("margin_right", 18)
+	score_margin.add_theme_constant_override("margin_bottom", 8)
+	score_card.add_child(score_margin)
+
 	points_label = Label.new()
 	points_label.name = "PointsLabel"
 	points_label.text = "Score: 0000"
 	points_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-	points_label.anchor_left   = 1.0
-	points_label.anchor_right  = 1.0
-	points_label.offset_left   = -220
-	points_label.offset_top    = 20
-	points_label.offset_right  = -20
-	points_label.offset_bottom = 60
-	points_label.add_theme_font_size_override("font_size", 28)
-	points_label.add_theme_color_override("font_color", Color(1.0, 0.92, 0.3))
-	points_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	points_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	points_label.add_theme_font_size_override("font_size", 34)
+	points_label.add_theme_color_override("font_color", Color(1.0, 0.95, 0.72))
+	points_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
 	points_label.add_theme_constant_override("shadow_offset_x", 2)
 	points_label.add_theme_constant_override("shadow_offset_y", 2)
-	canvas.add_child(points_label)
+	score_margin.add_child(points_label)
 
-	# ── Game Over overlay (centered, hidden by default) ──
+	# Game Over overlay (centered, hidden by default)
 	gameover_label = Label.new()
 	gameover_label.name = "GameOverLabel"
 	gameover_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	gameover_label.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
+	gameover_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
 	gameover_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	gameover_label.add_theme_font_size_override("font_size", 48)
-	gameover_label.add_theme_color_override("font_color", Color(1.0, 0.2, 0.2))
-	gameover_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	gameover_label.add_theme_color_override("font_color", Color(1.0, 0.25, 0.25))
+	gameover_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.85))
 	gameover_label.add_theme_constant_override("shadow_offset_x", 3)
 	gameover_label.add_theme_constant_override("shadow_offset_y", 3)
 	gameover_label.visible = false
-	canvas.add_child(gameover_label)
-
+	ui_root.add_child(gameover_label)
 
 func _build_pickup_spawner() -> void:
 	pickup_timer = Timer.new()
@@ -258,23 +426,213 @@ func _create_obstacle(z: float) -> void:
 		randf_range(-SPAWN_X_RANGE, SPAWN_X_RANGE), half, z)
 
 	var side := half * 2.0
-	var mi   := MeshInstance3D.new()
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(side, side, side)
-	mi.mesh   = mesh
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(
-		randf_range(0.7, 1.0),
-		randf_range(0.1, 0.3),
-		randf_range(0.1, 0.3))
-	mi.material_override = mat
-	body.add_child(mi)
+	var floor_y := -half
+	var style := randi_range(0, 2)
+
+	var base_mat := _make_obstacle_material(
+		Color(randf_range(0.18, 0.35), randf_range(0.24, 0.42), randf_range(0.46, 0.72)),
+		0.78,
+		0.15)
+	var accent_mat := _make_obstacle_material(
+		Color(randf_range(0.85, 1.0), randf_range(0.52, 0.78), randf_range(0.16, 0.36)),
+		0.55,
+		0.4)
+	var metal_mat := _make_obstacle_material(
+		Color(randf_range(0.58, 0.82), randf_range(0.58, 0.82), randf_range(0.62, 0.92)),
+		0.25,
+		0.75)
+
+	match style:
+		0:
+			# Barricade: base + two poles + guard beam
+			var base := BoxMesh.new()
+			base.size = Vector3(side * 1.70, side * 0.28, side * 0.90)
+			_add_obstacle_mesh(
+				body, base,
+				Vector3(0, floor_y + base.size.y * 0.5, 0),
+				Vector3.ZERO,
+				base_mat)
+
+			var pole := CylinderMesh.new()
+			pole.height = side * 0.95
+			pole.top_radius = side * 0.09
+			pole.bottom_radius = side * 0.10
+			_add_obstacle_mesh(
+				body, pole,
+				Vector3(-side * 0.52, floor_y + base.size.y + pole.height * 0.5, 0),
+				Vector3.ZERO,
+				metal_mat)
+			_add_obstacle_mesh(
+				body, pole,
+				Vector3(side * 0.52, floor_y + base.size.y + pole.height * 0.5, 0),
+				Vector3.ZERO,
+				metal_mat)
+
+			var guard_beam := BoxMesh.new()
+			guard_beam.size = Vector3(side * 1.25, side * 0.15, side * 0.20)
+			_add_obstacle_mesh(
+				body, guard_beam,
+				Vector3(0, floor_y + base.size.y + pole.height * 0.72, 0),
+				Vector3.ZERO,
+				accent_mat)
+
+			var stripe := BoxMesh.new()
+			stripe.size = Vector3(side * 0.86, side * 0.08, side * 0.16)
+			_add_obstacle_mesh(
+				body, stripe,
+				Vector3(0, floor_y + base.size.y + pole.height * 0.50, 0),
+				Vector3(0, 0, 18),
+				accent_mat)
+
+			body.set_meta("spin_y_speed", randf_range(-0.38, 0.38))
+
+		1:
+			# Rotating hammer: pedestal + pillar + spinning beam
+			var pedestal := BoxMesh.new()
+			pedestal.size = Vector3(side * 1.15, side * 0.32, side * 1.15)
+			_add_obstacle_mesh(
+				body, pedestal,
+				Vector3(0, floor_y + pedestal.size.y * 0.5, 0),
+				Vector3.ZERO,
+				base_mat)
+
+			var pillar := CylinderMesh.new()
+			pillar.height = side * 1.40
+			pillar.top_radius = side * 0.11
+			pillar.bottom_radius = side * 0.13
+			_add_obstacle_mesh(
+				body, pillar,
+				Vector3(0, floor_y + pedestal.size.y + pillar.height * 0.5, 0),
+				Vector3.ZERO,
+				metal_mat)
+
+			var rotor := Node3D.new()
+			rotor.name = "Rotor"
+			rotor.position = Vector3(0, floor_y + pedestal.size.y + pillar.height * 0.80, 0)
+			body.add_child(rotor)
+
+			var beam := BoxMesh.new()
+			beam.size = Vector3(side * 1.55, side * 0.16, side * 0.16)
+			_add_obstacle_mesh(
+				rotor, beam,
+				Vector3.ZERO,
+				Vector3.ZERO,
+				accent_mat)
+
+			var hammer_head := BoxMesh.new()
+			hammer_head.size = Vector3(side * 0.35, side * 0.35, side * 0.35)
+			_add_obstacle_mesh(
+				rotor, hammer_head,
+				Vector3(side * 0.78, 0, 0),
+				Vector3.ZERO,
+				metal_mat)
+
+			body.set_meta("spin_y_speed", randf_range(-0.24, 0.24))
+			body.set_meta("rotor_path", NodePath("Rotor"))
+			body.set_meta("rotor_axis", Vector3(0, 0, 1))
+			body.set_meta("rotor_speed", randf_range(1.1, 1.9))
+
+		_:
+			# Pillar: base + core + top + rotating fins
+			var plinth := CylinderMesh.new()
+			plinth.height = side * 0.36
+			plinth.top_radius = side * 0.38
+			plinth.bottom_radius = side * 0.46
+			_add_obstacle_mesh(
+				body, plinth,
+				Vector3(0, floor_y + plinth.height * 0.5, 0),
+				Vector3.ZERO,
+				base_mat)
+
+			var core := CylinderMesh.new()
+			core.height = side * 1.55
+			core.top_radius = side * 0.22
+			core.bottom_radius = side * 0.24
+			_add_obstacle_mesh(
+				body, core,
+				Vector3(0, floor_y + plinth.height + core.height * 0.5, 0),
+				Vector3.ZERO,
+				metal_mat)
+
+			var cap := SphereMesh.new()
+			cap.radius = side * 0.22
+			cap.height = side * 0.44
+			_add_obstacle_mesh(
+				body, cap,
+				Vector3(0, floor_y + plinth.height + core.height + cap.radius * 0.7, 0),
+				Vector3.ZERO,
+				accent_mat)
+
+			var fin_rotor := Node3D.new()
+			fin_rotor.name = "FinRotor"
+			fin_rotor.position = Vector3(0, floor_y + plinth.height + core.height * 0.55, 0)
+			body.add_child(fin_rotor)
+
+			for i in range(3):
+				var fin := BoxMesh.new()
+				fin.size = Vector3(side * 1.05, side * 0.10, side * 0.14)
+				_add_obstacle_mesh(
+					fin_rotor, fin,
+					Vector3.ZERO,
+					Vector3(0, i * 120.0, 0),
+					accent_mat)
+
+			body.set_meta("spin_y_speed", randf_range(-0.42, 0.42))
+			body.set_meta("rotor_path", NodePath("FinRotor"))
+			body.set_meta("rotor_axis", Vector3.UP)
+			body.set_meta("rotor_speed", randf_range(-0.9, 0.9))
 
 	var cs    := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
 	shape.size = Vector3(side, side, side)
 	cs.shape   = shape
 	body.add_child(cs)
+
+
+func _make_obstacle_material(color: Color, roughness: float, metallic: float) -> StandardMaterial3D:
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.roughness = roughness
+	mat.metallic = metallic
+	return mat
+
+
+func _add_obstacle_mesh(
+	parent: Node3D, mesh: Mesh, pos: Vector3, rot_deg: Vector3, mat: StandardMaterial3D
+) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.position = pos
+	mi.rotation_degrees = rot_deg
+	mi.material_override = mat
+	parent.add_child(mi)
+	return mi
+
+
+func _animate_obstacles(delta: float) -> void:
+	for obs in get_tree().get_nodes_in_group("obstacles"):
+		if not (obs is Node3D):
+			continue
+		var obs_node := obs as Node3D
+
+		var spin_y := float(obs_node.get_meta("spin_y_speed", 0.0))
+		if spin_y != 0.0:
+			obs_node.rotate_y(spin_y * delta)
+
+		var rotor_path: NodePath = obs_node.get_meta("rotor_path", NodePath(""))
+		if rotor_path == NodePath(""):
+			continue
+
+		var rotor := obs_node.get_node_or_null(rotor_path) as Node3D
+		if rotor == null:
+			continue
+
+		var rotor_axis: Vector3 = obs_node.get_meta("rotor_axis", Vector3.ZERO)
+		var rotor_speed := float(obs_node.get_meta("rotor_speed", 0.0))
+		if rotor_speed == 0.0:
+			continue
+		if rotor_axis.length_squared() > 0.0:
+			rotor.rotate(rotor_axis.normalized(), rotor_speed * delta)
 
 
 func _cleanup_obstacles() -> void:
@@ -438,6 +796,9 @@ func _physics_process(delta: float) -> void:
 func _process(delta: float) -> void:
 	if player == null:
 		return
+
+	_update_player_model_animation(delta)
+	_animate_obstacles(delta)
 
 	if camera_rig:
 		camera_rig.global_position = player.global_position
