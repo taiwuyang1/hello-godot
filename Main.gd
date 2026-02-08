@@ -5,7 +5,7 @@ extends Node3D
 ## Collect gold pickups for points; hit an obstacle or fall off → Game Over.
 
 # ───────── tunables ─────────
-const RUN_SPEED       := 14.0
+const RUN_SPEED       := 16.0
 const STRAFE_SPEED    := 10.0
 const JUMP_VELOCITY   := 7.0
 const GRAVITY         := 20.0
@@ -13,10 +13,12 @@ const SPRING_LENGTH   := 8.0
 const CAM_PITCH_DEG   := -15.0
 
 const SPAWN_HORIZON   := 60.0
-const SPAWN_Z_GAP_MIN := 8.0
-const SPAWN_Z_GAP_MAX := 12.0
-const SPAWN_X_RANGE   := 4.0
-const MAX_OBSTACLES   := 10
+const SPAWN_Z_GAP_MIN := 6.2
+const SPAWN_Z_GAP_MAX := 9.2
+const SPAWN_X_RANGE   := 13.0
+const SPAWN_FOLLOW_WEIGHT := 0.90
+const SPAWN_LANE_HALF_WIDTH := 2.2
+const MAX_OBSTACLES   := 14
 const CLEANUP_BEHIND  := 40.0
 
 const PICKUP_Z_MIN    := 25.0     # pickups spawn 25–40 m ahead
@@ -29,6 +31,14 @@ const PICKUP_TTL      := 17.0     # auto-destroy seconds
 const FALL_LIMIT      := -10.0
 
 @export var pickup_points: int = 10
+
+class HeadScoreFloat:
+	var label: Label
+	var base_offset: Vector3 = Vector3.ZERO
+	var rise_height: float = 0.9
+	var drift_x: float = 0.0
+	var duration: float = 0.5
+	var age: float = 0.0
 
 # ───────── runtime refs ─────────
 var player       : CharacterBody3D
@@ -55,6 +65,7 @@ var points_label   : Label
 var gameover_label : Label
 var ui_root        : Control
 var score_card     : PanelContainer
+var head_score_floats: Array[HeadScoreFloat] = []
 
 # ───────── game state ─────────
 var game_over  : bool  = false
@@ -348,43 +359,44 @@ func _build_ui() -> void:
 	time_card.anchor_bottom = 0.0
 	time_card.offset_left = 20
 	time_card.offset_top = 20
-	time_card.offset_right = 210
-	time_card.offset_bottom = 66
+	time_card.offset_right = 300
+	time_card.offset_bottom = 86
 	time_card.mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	var time_style := StyleBoxFlat.new()
-	time_style.bg_color = Color(0.05, 0.08, 0.13, 0.55)
-	time_style.corner_radius_top_left = 14
-	time_style.corner_radius_top_right = 14
-	time_style.corner_radius_bottom_right = 14
-	time_style.corner_radius_bottom_left = 14
+	time_style.bg_color = Color(0.07, 0.1, 0.16, 0.62)
+	time_style.corner_radius_top_left = 18
+	time_style.corner_radius_top_right = 18
+	time_style.corner_radius_bottom_right = 18
+	time_style.corner_radius_bottom_left = 18
 	time_style.border_width_left = 2
 	time_style.border_width_top = 2
 	time_style.border_width_right = 2
 	time_style.border_width_bottom = 2
-	time_style.border_color = Color(0.75, 0.88, 1.0, 0.5)
-	time_style.shadow_color = Color(0, 0, 0, 0.45)
-	time_style.shadow_size = 6
-	time_style.shadow_offset = Vector2(0, 3)
+	time_style.border_color = Color(0.75, 0.88, 1.0, 0.6)
+	time_style.shadow_color = Color(0, 0, 0, 0.5)
+	time_style.shadow_size = 9
+	time_style.shadow_offset = Vector2(0, 4)
 	time_card.add_theme_stylebox_override("panel", time_style)
 	ui_root.add_child(time_card)
 
 	var time_margin := MarginContainer.new()
-	time_margin.add_theme_constant_override("margin_left", 12)
-	time_margin.add_theme_constant_override("margin_top", 6)
-	time_margin.add_theme_constant_override("margin_right", 12)
-	time_margin.add_theme_constant_override("margin_bottom", 6)
+	time_margin.add_theme_constant_override("margin_left", 18)
+	time_margin.add_theme_constant_override("margin_top", 8)
+	time_margin.add_theme_constant_override("margin_right", 18)
+	time_margin.add_theme_constant_override("margin_bottom", 8)
 	time_card.add_child(time_margin)
 
 	time_label = Label.new()
 	time_label.name = "TimeLabel"
 	time_label.text = "Time: 0.0"
+	time_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
 	time_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	time_label.add_theme_font_size_override("font_size", 24)
-	time_label.add_theme_color_override("font_color", Color(0.9, 0.98, 1.0))
+	time_label.add_theme_font_size_override("font_size", 32)
+	time_label.add_theme_color_override("font_color", Color(0.95, 0.98, 1.0))
 	time_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
-	time_label.add_theme_constant_override("shadow_offset_x", 1)
-	time_label.add_theme_constant_override("shadow_offset_y", 1)
+	time_label.add_theme_constant_override("shadow_offset_x", 2)
+	time_label.add_theme_constant_override("shadow_offset_y", 2)
 	time_margin.add_child(time_label)
 
 	# Score card (top-right)
@@ -410,7 +422,7 @@ func _build_ui() -> void:
 	score_style.border_width_top = 2
 	score_style.border_width_right = 2
 	score_style.border_width_bottom = 2
-	score_style.border_color = Color(1.0, 0.92, 0.55, 0.75)
+	score_style.border_color = Color(0.75, 0.88, 1.0, 0.6)
 	score_style.shadow_color = Color(0, 0, 0, 0.5)
 	score_style.shadow_size = 9
 	score_style.shadow_offset = Vector2(0, 4)
@@ -429,8 +441,8 @@ func _build_ui() -> void:
 	points_label.text = "Score: 0000"
 	points_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	points_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
-	points_label.add_theme_font_size_override("font_size", 34)
-	points_label.add_theme_color_override("font_color", Color(1.0, 0.95, 0.72))
+	points_label.add_theme_font_size_override("font_size", 32)
+	points_label.add_theme_color_override("font_color", Color(0.95, 0.98, 1.0))
 	points_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.55))
 	points_label.add_theme_constant_override("shadow_offset_x", 2)
 	points_label.add_theme_constant_override("shadow_offset_y", 2)
@@ -479,9 +491,20 @@ func _create_obstacle(z: float) -> void:
 	body.add_to_group("obstacles")
 	add_child(body)
 
-	var half := randf_range(0.4, 1.2)
-	body.global_position = Vector3(
-		randf_range(-SPAWN_X_RANGE, SPAWN_X_RANGE), half, z)
+	var half := randf_range(0.55, 1.35)
+	var player_x := 0.0
+	if player != null:
+		player_x = player.global_position.x
+	var clamped_player_x := clampf(player_x, -SPAWN_X_RANGE, SPAWN_X_RANGE)
+	var random_center := randf_range(-SPAWN_X_RANGE, SPAWN_X_RANGE)
+	var spawn_center := lerpf(random_center, clamped_player_x, SPAWN_FOLLOW_WEIGHT)
+	var x_min := clampf(spawn_center - SPAWN_LANE_HALF_WIDTH, -SPAWN_X_RANGE, SPAWN_X_RANGE)
+	var x_max := clampf(spawn_center + SPAWN_LANE_HALF_WIDTH, -SPAWN_X_RANGE, SPAWN_X_RANGE)
+	if x_max - x_min < 0.2:
+		x_min = -SPAWN_X_RANGE
+		x_max = SPAWN_X_RANGE
+	var spawn_x := randf_range(x_min, x_max)
+	body.global_position = Vector3(spawn_x, half, z)
 
 	var side := half * 2.0
 	var floor_y := -half
@@ -811,7 +834,8 @@ func _play_score_feedback(added_points: int) -> void:
 		text_tween.tween_property(points_label, "scale", Vector2.ONE, 0.12)
 
 		var text_color_tween := create_tween()
-		text_color_tween.tween_property(points_label, "modulate", Color(1.0, 0.95, 0.72, 1.0), 0.20)
+		text_color_tween.tween_property(points_label, "modulate", Color(1.0, 0.95, 0.72, 1.0), 0.10)
+		text_color_tween.tween_property(points_label, "modulate", Color.WHITE, 0.12)
 
 	if ui_root:
 		var float_label := Label.new()
@@ -846,6 +870,75 @@ func _play_score_feedback(added_points: int) -> void:
 		float_tween.parallel().tween_property(float_label, "offset_top", rise_top, 0.34)
 		float_tween.parallel().tween_property(float_label, "offset_bottom", rise_bottom, 0.34)
 		float_tween.tween_callback(float_label.queue_free)
+
+	_spawn_head_score_feedback(added_points)
+
+
+func _spawn_head_score_feedback(added_points: int) -> void:
+	if ui_root == null or player == null:
+		return
+
+	var head_label := Label.new()
+	head_label.name = "HeadScoreFloatLabel"
+	head_label.text = "+%d" % added_points
+	head_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	head_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	head_label.custom_minimum_size = Vector2(96, 30)
+	head_label.add_theme_font_size_override("font_size", 24)
+	head_label.add_theme_color_override("font_color", Color(1.0, 0.96, 0.70, 1.0))
+	head_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.7))
+	head_label.add_theme_constant_override("shadow_offset_x", 2)
+	head_label.add_theme_constant_override("shadow_offset_y", 2)
+	head_label.modulate = Color(1, 1, 1, 0)
+	ui_root.add_child(head_label)
+
+	var float_data: HeadScoreFloat = HeadScoreFloat.new()
+	float_data.label = head_label
+	float_data.base_offset = Vector3(randf_range(-0.14, 0.14), 1.9, 0)
+	float_data.rise_height = randf_range(0.6, 0.95)
+	float_data.drift_x = randf_range(-0.15, 0.15)
+	float_data.duration = randf_range(0.42, 0.56)
+	head_score_floats.append(float_data)
+
+
+func _update_head_score_feedbacks(delta: float) -> void:
+	if head_score_floats.is_empty() or player == null:
+		return
+
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		return
+
+	for i in range(head_score_floats.size() - 1, -1, -1):
+		var float_data: HeadScoreFloat = head_score_floats[i]
+		if float_data.label == null:
+			head_score_floats.remove_at(i)
+			continue
+
+		float_data.age += delta
+		var t := clampf(float_data.age / float_data.duration, 0.0, 1.0)
+		if t >= 1.0:
+			float_data.label.queue_free()
+			head_score_floats.remove_at(i)
+			continue
+
+		var world_pos := player.global_position + float_data.base_offset
+		world_pos.y += float_data.rise_height * t
+		world_pos.x += float_data.drift_x * t
+
+		if cam.is_position_behind(world_pos):
+			float_data.label.visible = false
+			continue
+
+		float_data.label.visible = true
+		var screen_pos := cam.unproject_position(world_pos)
+		float_data.label.position = screen_pos + Vector2(-48, -20)
+
+		var fade_in := clampf(t / 0.18, 0.0, 1.0)
+		var fade_out := clampf((1.0 - t) / 0.45, 0.0, 1.0)
+		var alpha := minf(fade_in, fade_out)
+		float_data.label.modulate = Color(1, 1, 1, alpha)
+		float_data.label.scale = Vector2.ONE * (0.92 + 0.15 * fade_in)
 
 
 func _cleanup_pickups() -> void:
@@ -930,6 +1023,8 @@ func _process(delta: float) -> void:
 
 	if ground:
 		ground.position.z = player.global_position.z
+
+	_update_head_score_feedbacks(delta)
 
 	if not game_over:
 		score_time += delta
