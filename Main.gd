@@ -37,6 +37,8 @@ var spring_arm   : SpringArm3D
 var ground       : StaticBody3D
 var pickup_timer : Timer
 var model_root      : Node3D
+var body_mesh_instance : MeshInstance3D
+var head_mesh_instance : MeshInstance3D
 var left_arm_pivot  : Node3D
 var right_arm_pivot : Node3D
 var left_leg_pivot  : Node3D
@@ -51,6 +53,8 @@ var next_spawn_z : float = 0.0
 var time_label     : Label
 var points_label   : Label
 var gameover_label : Label
+var ui_root        : Control
+var score_card     : PanelContainer
 
 # ───────── game state ─────────
 var game_over  : bool  = false
@@ -150,31 +154,31 @@ func _build_player() -> void:
 	model_root.position = Vector3(0, 0.08, 0)
 	player.add_child(model_root)
 
-	var body := MeshInstance3D.new()
-	body.name = "Body"
+	body_mesh_instance = MeshInstance3D.new()
+	body_mesh_instance.name = "Body"
 	var body_mesh := CapsuleMesh.new()
 	body_mesh.radius = 0.23
 	body_mesh.height = 0.60
-	body.mesh = body_mesh
+	body_mesh_instance.mesh = body_mesh
 	var body_mat := StandardMaterial3D.new()
 	body_mat.albedo_color = Color(0.15, 0.35, 0.85)
 	body_mat.roughness = 0.85
-	body.material_override = body_mat
-	body.position = Vector3(0, 0.54, 0)
-	model_root.add_child(body)
+	body_mesh_instance.material_override = body_mat
+	body_mesh_instance.position = Vector3(0, 0.54, 0)
+	model_root.add_child(body_mesh_instance)
 
-	var head := MeshInstance3D.new()
-	head.name = "Head"
+	head_mesh_instance = MeshInstance3D.new()
+	head_mesh_instance.name = "Head"
 	var head_mesh := SphereMesh.new()
 	head_mesh.radius = 0.18
 	head_mesh.height = 0.36
-	head.mesh = head_mesh
+	head_mesh_instance.mesh = head_mesh
 	var head_mat := StandardMaterial3D.new()
 	head_mat.albedo_color = Color(0.95, 0.83, 0.70)
 	head_mat.roughness = 0.95
-	head.material_override = head_mat
-	head.position = Vector3(0, 1.05, 0)
-	model_root.add_child(head)
+	head_mesh_instance.material_override = head_mat
+	head_mesh_instance.position = Vector3(0, 1.05, 0)
+	model_root.add_child(head_mesh_instance)
 
 	left_arm_pivot = _create_limb_pivot("LeftArm", 0.48, 0.065, Color(0.16, 0.38, 0.92))
 	left_arm_pivot.position = Vector3(-0.30, 0.82, 0)
@@ -228,28 +232,82 @@ func _update_player_model_animation(delta: float) -> void:
 		return
 
 	var planar_speed := Vector2(player.velocity.x, player.velocity.z).length()
+	var on_floor := player.is_on_floor()
+	var speed_ratio := clampf(planar_speed / RUN_SPEED, 0.0, 1.0)
+
 	var target_blend := 0.0
-	if player.is_on_floor() and planar_speed > 0.1:
-		target_blend = 1.0
-	elif not player.is_on_floor():
-		target_blend = 0.2
+	if on_floor and planar_speed > 0.1:
+		target_blend = speed_ratio
+	elif not on_floor:
+		target_blend = 0.22
 
-	run_anim_blend = lerpf(run_anim_blend, target_blend, minf(1.0, delta * 10.0))
-	run_anim_phase += delta * (8.0 + planar_speed * 0.35)
-	if run_anim_phase > TAU:
-		run_anim_phase -= TAU
+	run_anim_blend = lerpf(run_anim_blend, target_blend, minf(1.0, delta * 9.0))
 
-	var arm_swing := sin(run_anim_phase) * 0.55 * run_anim_blend
-	var leg_swing := sin(run_anim_phase) * 0.45 * run_anim_blend
+	var cadence := lerpf(5.8, 11.5, speed_ratio)
+	run_anim_phase = fmod(run_anim_phase + delta * cadence, TAU)
+
+	var phase := run_anim_phase
+	var double_phase := phase * 2.0
+	var left_step := sin(phase)
+	var right_step := sin(phase + PI)
+	var left_lift := maxf(0.0, sin(phase + PI * 0.5))
+	var right_lift := maxf(0.0, sin(phase + PI * 1.5))
+
+	var bob: float = absf(sin(double_phase)) * 0.065 * run_anim_blend
+	var sway := sin(phase) * 0.05 * run_anim_blend
+	var hip_pitch := 0.03 * run_anim_blend + sin(double_phase + 0.4) * 0.02 * run_anim_blend
+	var hip_yaw := sin(phase) * 0.08 * run_anim_blend
+	var hip_roll := sin(phase + PI * 0.5) * 0.035 * run_anim_blend
+
+	if not on_floor:
+		bob = lerpf(bob, 0.01, 0.7)
+		sway = lerpf(sway, 0.0, 0.6)
+		hip_pitch = lerpf(hip_pitch, -0.06, 0.5)
+		hip_yaw *= 0.5
+		hip_roll *= 0.45
+
+	model_root.position = Vector3(sway, 0.08 + bob, 0)
+	model_root.rotation = Vector3(hip_pitch, hip_yaw, hip_roll)
+
+	if body_mesh_instance:
+		var body_twist := -hip_yaw * 0.9
+		var body_lean := 0.06 * run_anim_blend + sin(double_phase + PI) * 0.03 * run_anim_blend
+		body_mesh_instance.position = Vector3(0, 0.54, 0)
+		body_mesh_instance.rotation = Vector3(body_lean, body_twist, 0.0)
+
+	if head_mesh_instance:
+		var head_nod := sin(double_phase + PI * 0.35) * 0.07 * run_anim_blend
+		var head_counter := -hip_pitch * 0.35
+		var head_tilt := sin(phase + PI * 0.5) * 0.02 * run_anim_blend
+		head_mesh_instance.position = Vector3(0, 1.05 + sin(double_phase + 0.9) * 0.015 * run_anim_blend, 0)
+		head_mesh_instance.rotation = Vector3(head_counter + head_nod, 0.0, head_tilt)
+
+	var arm_secondary := sin(double_phase + 0.35) * 0.14 * run_anim_blend
+	var left_arm_pitch := right_step * 0.92 * run_anim_blend + arm_secondary
+	var right_arm_pitch := left_step * 0.92 * run_anim_blend - arm_secondary
+	if not on_floor:
+		left_arm_pitch = lerpf(left_arm_pitch, -0.28, 0.5)
+		right_arm_pitch = lerpf(right_arm_pitch, -0.28, 0.5)
 
 	if left_arm_pivot:
-		left_arm_pivot.rotation.x = arm_swing
+		left_arm_pivot.position = Vector3(-0.30, 0.82 + bob * 0.25, 0)
+		left_arm_pivot.rotation = Vector3(left_arm_pitch, 0.05 * run_anim_blend, -0.10 + sin(double_phase) * 0.04 * run_anim_blend)
 	if right_arm_pivot:
-		right_arm_pivot.rotation.x = -arm_swing
+		right_arm_pivot.position = Vector3(0.30, 0.82 + bob * 0.25, 0)
+		right_arm_pivot.rotation = Vector3(right_arm_pitch, -0.05 * run_anim_blend, 0.10 - sin(double_phase) * 0.04 * run_anim_blend)
+
+	var left_leg_pitch := -left_step * 0.90 * run_anim_blend + left_lift * 0.28 * run_anim_blend
+	var right_leg_pitch := -right_step * 0.90 * run_anim_blend + right_lift * 0.28 * run_anim_blend
+	if not on_floor:
+		left_leg_pitch = lerpf(left_leg_pitch, 0.32, 0.4)
+		right_leg_pitch = lerpf(right_leg_pitch, 0.32, 0.4)
+
 	if left_leg_pivot:
-		left_leg_pivot.rotation.x = -leg_swing
+		left_leg_pivot.position = Vector3(-0.14, 0.40 + left_lift * 0.035 * run_anim_blend, 0)
+		left_leg_pivot.rotation = Vector3(left_leg_pitch, 0.0, 0.03 * run_anim_blend)
 	if right_leg_pivot:
-		right_leg_pivot.rotation.x = leg_swing
+		right_leg_pivot.position = Vector3(0.14, 0.40 + right_lift * 0.035 * run_anim_blend, 0)
+		right_leg_pivot.rotation = Vector3(right_leg_pitch, 0.0, -0.03 * run_anim_blend)
 
 
 func _build_camera_rig() -> void:
@@ -275,7 +333,7 @@ func _build_ui() -> void:
 	canvas.name = "UI"
 	add_child(canvas)
 
-	var ui_root := Control.new()
+	ui_root = Control.new()
 	ui_root.name = "UIRoot"
 	ui_root.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	ui_root.mouse_filter = Control.MOUSE_FILTER_PASS
@@ -330,7 +388,7 @@ func _build_ui() -> void:
 	time_margin.add_child(time_label)
 
 	# Score card (top-right)
-	var score_card := PanelContainer.new()
+	score_card = PanelContainer.new()
 	score_card.name = "ScoreCard"
 	score_card.anchor_left = 1.0
 	score_card.anchor_top = 0.0
@@ -709,6 +767,7 @@ func _on_pickup_collected(body: Node3D, pickup: Area3D) -> void:
 
 	score += pickup_points
 	_update_points_label()
+	_play_score_feedback(pickup_points)
 
 	# Prevent double-collection
 	pickup.set_deferred("monitoring", false)
@@ -721,6 +780,72 @@ func _on_pickup_collected(body: Node3D, pickup: Area3D) -> void:
 
 func _update_points_label() -> void:
 	points_label.text = "Score: %04d" % score
+
+
+func _play_score_feedback(added_points: int) -> void:
+	var card_scale := 1.08
+	var text_scale := 1.15
+	if score > 0 and score % 100 == 0:
+		card_scale = 1.13
+		text_scale = 1.20
+
+	if score_card:
+		score_card.scale = Vector2.ONE
+		score_card.modulate = Color(1.0, 0.98, 0.90, 1.0)
+
+		var card_tween := create_tween()
+		card_tween.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		card_tween.tween_property(score_card, "scale", Vector2.ONE * card_scale, 0.08)
+		card_tween.tween_property(score_card, "scale", Vector2.ONE, 0.14)
+
+		var card_color_tween := create_tween()
+		card_color_tween.tween_property(score_card, "modulate", Color.WHITE, 0.22)
+
+	if points_label:
+		points_label.scale = Vector2.ONE
+		points_label.modulate = Color(1.0, 1.0, 0.86, 1.0)
+
+		var text_tween := create_tween()
+		text_tween.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		text_tween.tween_property(points_label, "scale", Vector2.ONE * text_scale, 0.08)
+		text_tween.tween_property(points_label, "scale", Vector2.ONE, 0.12)
+
+		var text_color_tween := create_tween()
+		text_color_tween.tween_property(points_label, "modulate", Color(1.0, 0.95, 0.72, 1.0), 0.20)
+
+	if ui_root:
+		var float_label := Label.new()
+		float_label.name = "ScoreFloatLabel"
+		float_label.text = "+%d" % added_points
+		float_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+		float_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+		float_label.anchor_left = 1.0
+		float_label.anchor_right = 1.0
+		float_label.anchor_top = 0.0
+		float_label.anchor_bottom = 0.0
+		float_label.offset_left = -220
+		float_label.offset_top = 90
+		float_label.offset_right = -20
+		float_label.offset_bottom = 124
+		float_label.add_theme_font_size_override("font_size", 24)
+		float_label.add_theme_color_override("font_color", Color(1.0, 0.94, 0.58, 1.0))
+		float_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+		float_label.add_theme_constant_override("shadow_offset_x", 1)
+		float_label.add_theme_constant_override("shadow_offset_y", 1)
+		float_label.modulate = Color(1, 1, 1, 0)
+		ui_root.add_child(float_label)
+
+		var rise_top := float_label.offset_top - 34.0
+		var rise_bottom := float_label.offset_bottom - 34.0
+
+		var float_tween := create_tween()
+		float_tween.tween_property(float_label, "modulate:a", 1.0, 0.06)
+		float_tween.parallel().tween_property(float_label, "offset_top", float_label.offset_top - 8.0, 0.06)
+		float_tween.parallel().tween_property(float_label, "offset_bottom", float_label.offset_bottom - 8.0, 0.06)
+		float_tween.tween_property(float_label, "modulate:a", 0.0, 0.34)
+		float_tween.parallel().tween_property(float_label, "offset_top", rise_top, 0.34)
+		float_tween.parallel().tween_property(float_label, "offset_bottom", rise_bottom, 0.34)
+		float_tween.tween_callback(float_label.queue_free)
 
 
 func _cleanup_pickups() -> void:
