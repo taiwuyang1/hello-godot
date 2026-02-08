@@ -2,41 +2,53 @@ extends Node3D
 
 ## Auto-run 3D Parkour — fully procedural
 ## Player runs forward (-Z) automatically; A/D to dodge, Space to jump.
-## Hit an obstacle or fall off → Game Over → press R to restart.
+## Collect gold pickups for points; hit an obstacle or fall off → Game Over.
 
 # ───────── tunables ─────────
-const RUN_SPEED       := 14.0     # auto-forward speed
-const STRAFE_SPEED    := 10.0     # A/D lateral speed
+const RUN_SPEED       := 14.0
+const STRAFE_SPEED    := 10.0
 const JUMP_VELOCITY   := 7.0
 const GRAVITY         := 20.0
-const SPRING_LENGTH   := 8.0      # camera distance
-const CAM_PITCH_DEG   := -15.0    # camera angle (negative = above & behind)
+const SPRING_LENGTH   := 8.0
+const CAM_PITCH_DEG   := -15.0
 
-const SPAWN_HORIZON   := 60.0     # pre-fill obstacles this far ahead
-const SPAWN_Z_GAP_MIN := 8.0      # min Z gap between consecutive obstacles
-const SPAWN_Z_GAP_MAX := 12.0     # max Z gap
-const SPAWN_X_RANGE   := 4.0      # obstacles spawn in X ∈ [-4, +4]
-const MAX_OBSTACLES   := 10       # hard cap on simultaneous obstacles
-const CLEANUP_BEHIND  := 40.0     # destroy obstacles this far behind player
+const SPAWN_HORIZON   := 60.0
+const SPAWN_Z_GAP_MIN := 8.0
+const SPAWN_Z_GAP_MAX := 12.0
+const SPAWN_X_RANGE   := 4.0
+const MAX_OBSTACLES   := 10
+const CLEANUP_BEHIND  := 40.0
 
-const FALL_LIMIT      := -10.0    # Y below which player is considered dead
+const PICKUP_Z_MIN    := 25.0     # pickups spawn 25–40 m ahead
+const PICKUP_Z_MAX    := 40.0
+const PICKUP_X_RANGE  := 6.0      # X ∈ [-6, +6]
+const PICKUP_Y_MIN    := 1.0
+const PICKUP_Y_MAX    := 1.5
+const PICKUP_TTL      := 17.0     # auto-destroy seconds
+
+const FALL_LIMIT      := -10.0
+
+@export var pickup_points: int = 10
 
 # ───────── runtime refs ─────────
-var player     : CharacterBody3D
-var camera_rig : Node3D
-var spring_arm : SpringArm3D
-var ground     : StaticBody3D
+var player       : CharacterBody3D
+var camera_rig   : Node3D
+var spring_arm   : SpringArm3D
+var ground       : StaticBody3D
+var pickup_timer : Timer
 
 # ───────── obstacle state ─────────
-var next_spawn_z : float = 0.0    # Z of the next obstacle to create
+var next_spawn_z : float = 0.0
 
 # ───────── UI refs ─────────
-var score_label    : Label
+var time_label     : Label
+var points_label   : Label
 var gameover_label : Label
 
 # ───────── game state ─────────
 var game_over  : bool  = false
 var score_time : float = 0.0
+var score      : int   = 0
 
 # ══════════════════════════════════════════════════════════════
 #  Lifecycle
@@ -50,12 +62,12 @@ func _ready() -> void:
 	_build_player()
 	_build_camera_rig()
 	_build_ui()
+	_build_pickup_spawner()
 
-	# First obstacle row starts 20 m ahead of the player
 	next_spawn_z = player.global_position.z - 20.0
 
 # ══════════════════════════════════════════════════════════════
-#  Input-action registration  (zero manual InputMap setup)
+#  Input-action registration
 # ══════════════════════════════════════════════════════════════
 
 func _register_actions() -> void:
@@ -76,14 +88,12 @@ func _add_key_action(action_name: String, keycode: Key) -> void:
 # ══════════════════════════════════════════════════════════════
 
 func _build_environment() -> void:
-	# Sun
 	var sun := DirectionalLight3D.new()
 	sun.rotation_degrees = Vector3(-45, -30, 0)
 	sun.shadow_enabled   = true
 	sun.light_energy     = 1.2
 	add_child(sun)
 
-	# Sky colour + ambient
 	var we  := WorldEnvironment.new()
 	var env := Environment.new()
 	env.background_mode      = Environment.BG_COLOR
@@ -98,11 +108,10 @@ func _build_environment() -> void:
 func _build_ground() -> void:
 	ground = StaticBody3D.new()
 	ground.name            = "Ground"
-	ground.collision_layer = 1        # layer 1
+	ground.collision_layer = 1
 	ground.collision_mask  = 0
 	add_child(ground)
 
-	# 30 wide × 200 long track — follows player Z every frame
 	var mi   := MeshInstance3D.new()
 	var mesh := BoxMesh.new()
 	mesh.size = Vector3(30, 1, 200)
@@ -118,14 +127,14 @@ func _build_ground() -> void:
 	cs.shape   = shape
 	ground.add_child(cs)
 
-	ground.position.y = -0.5          # surface at Y = 0
+	ground.position.y = -0.5
 
 
 func _build_player() -> void:
 	player = CharacterBody3D.new()
 	player.name            = "Player"
-	player.collision_layer = 2        # layer 2
-	player.collision_mask  = 1 | 4    # ground (1) + obstacles (4)
+	player.collision_layer = 2
+	player.collision_mask  = 1 | 4
 	add_child(player)
 	player.position = Vector3(0, 1, 0)
 
@@ -155,8 +164,8 @@ func _build_camera_rig() -> void:
 	spring_arm = SpringArm3D.new()
 	spring_arm.name               = "SpringArm"
 	spring_arm.spring_length      = SPRING_LENGTH
-	spring_arm.collision_mask     = 1     # only collide with ground
-	spring_arm.rotation_degrees.x = CAM_PITCH_DEG  # fixed behind & above
+	spring_arm.collision_mask     = 1
+	spring_arm.rotation_degrees.x = CAM_PITCH_DEG
 	camera_rig.add_child(spring_arm)
 
 	var cam := Camera3D.new()
@@ -170,22 +179,39 @@ func _build_ui() -> void:
 	canvas.name = "UI"
 	add_child(canvas)
 
-	# ── Score / survival timer (top-left) ──
-	score_label = Label.new()
-	score_label.name     = "ScoreLabel"
-	score_label.text     = "Time: 0.0"
-	score_label.position = Vector2(20, 20)
-	score_label.add_theme_font_size_override("font_size", 28)
-	score_label.add_theme_color_override("font_color", Color.WHITE)
-	score_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
-	score_label.add_theme_constant_override("shadow_offset_x", 2)
-	score_label.add_theme_constant_override("shadow_offset_y", 2)
-	canvas.add_child(score_label)
+	# ── Survival timer (top-left) ──
+	time_label = Label.new()
+	time_label.name     = "TimeLabel"
+	time_label.text     = "Time: 0.0"
+	time_label.position = Vector2(20, 20)
+	time_label.add_theme_font_size_override("font_size", 28)
+	time_label.add_theme_color_override("font_color", Color.WHITE)
+	time_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	time_label.add_theme_constant_override("shadow_offset_x", 2)
+	time_label.add_theme_constant_override("shadow_offset_y", 2)
+	canvas.add_child(time_label)
+
+	# ── Pickup score (top-right) ──
+	points_label = Label.new()
+	points_label.name = "PointsLabel"
+	points_label.text = "Score: 0000"
+	points_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	points_label.anchor_left   = 1.0
+	points_label.anchor_right  = 1.0
+	points_label.offset_left   = -220
+	points_label.offset_top    = 20
+	points_label.offset_right  = -20
+	points_label.offset_bottom = 60
+	points_label.add_theme_font_size_override("font_size", 28)
+	points_label.add_theme_color_override("font_color", Color(1.0, 0.92, 0.3))
+	points_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	points_label.add_theme_constant_override("shadow_offset_x", 2)
+	points_label.add_theme_constant_override("shadow_offset_y", 2)
+	canvas.add_child(points_label)
 
 	# ── Game Over overlay (centered, hidden by default) ──
 	gameover_label = Label.new()
 	gameover_label.name = "GameOverLabel"
-	gameover_label.text = "GAME OVER\nPress  R  to restart"
 	gameover_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	gameover_label.vertical_alignment   = VERTICAL_ALIGNMENT_CENTER
 	gameover_label.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
@@ -197,14 +223,22 @@ func _build_ui() -> void:
 	gameover_label.visible = false
 	canvas.add_child(gameover_label)
 
+
+func _build_pickup_spawner() -> void:
+	pickup_timer = Timer.new()
+	pickup_timer.name     = "PickupSpawner"
+	pickup_timer.one_shot = true
+	pickup_timer.autostart = false
+	add_child(pickup_timer)
+	pickup_timer.timeout.connect(_on_pickup_timer)
+	pickup_timer.start(randf_range(0.6, 1.2))
+
 # ══════════════════════════════════════════════════════════════
-#  Obstacle system  (distance-based, not timer-based)
+#  Obstacle system
 # ══════════════════════════════════════════════════════════════
 
 func _try_spawn_obstacles() -> void:
 	var count := get_tree().get_nodes_in_group("obstacles").size()
-
-	# Keep filling the horizon, respecting the cap
 	while next_spawn_z > player.global_position.z - SPAWN_HORIZON \
 			and count < MAX_OBSTACLES:
 		_create_obstacle(next_spawn_z)
@@ -214,18 +248,15 @@ func _try_spawn_obstacles() -> void:
 
 func _create_obstacle(z: float) -> void:
 	var body := StaticBody3D.new()
-	body.collision_layer = 4          # layer 3 bit
+	body.collision_layer = 4
 	body.collision_mask  = 0
 	body.add_to_group("obstacles")
 	add_child(body)
 
 	var half := randf_range(0.4, 1.2)
 	body.global_position = Vector3(
-		randf_range(-SPAWN_X_RANGE, SPAWN_X_RANGE),
-		half,                         # bottom sits on ground (Y=0)
-		z)
+		randf_range(-SPAWN_X_RANGE, SPAWN_X_RANGE), half, z)
 
-	# Mesh
 	var side := half * 2.0
 	var mi   := MeshInstance3D.new()
 	var mesh := BoxMesh.new()
@@ -239,7 +270,6 @@ func _create_obstacle(z: float) -> void:
 	mi.material_override = mat
 	body.add_child(mi)
 
-	# Collision shape
 	var cs    := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
 	shape.size = Vector3(side, side, side)
@@ -249,9 +279,96 @@ func _create_obstacle(z: float) -> void:
 
 func _cleanup_obstacles() -> void:
 	for obs in get_tree().get_nodes_in_group("obstacles"):
-		# obstacle is more than CLEANUP_BEHIND metres behind the player
 		if obs.global_position.z > player.global_position.z + CLEANUP_BEHIND:
 			obs.queue_free()
+
+# ══════════════════════════════════════════════════════════════
+#  Pickup system
+# ══════════════════════════════════════════════════════════════
+
+func _on_pickup_timer() -> void:
+	if game_over or player == null:
+		return
+	_create_pickup()
+	pickup_timer.start(randf_range(0.6, 1.2))
+
+
+func _create_pickup() -> void:
+	var area := Area3D.new()
+	area.collision_layer = 0
+	area.collision_mask  = 2          # detect player (layer 2)
+	area.monitoring      = true
+	area.monitorable     = false
+	area.add_to_group("pickups")
+	add_child(area)
+
+	# Position: ahead of player, random lateral, floating height
+	area.global_position = Vector3(
+		randf_range(-PICKUP_X_RANGE, PICKUP_X_RANGE),
+		randf_range(PICKUP_Y_MIN, PICKUP_Y_MAX),
+		player.global_position.z - randf_range(PICKUP_Z_MIN, PICKUP_Z_MAX))
+
+	# Gold sphere mesh
+	var mi   := MeshInstance3D.new()
+	var mesh := SphereMesh.new()
+	mesh.radius = 0.3
+	mesh.height = 0.6
+	mi.mesh     = mesh
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color              = Color(1.0, 0.84, 0.0)
+	mat.metallic                  = 0.8
+	mat.roughness                 = 0.2
+	mat.emission_enabled          = true
+	mat.emission                  = Color(1.0, 0.84, 0.0)
+	mat.emission_energy_multiplier = 0.4
+	mi.material_override = mat
+	area.add_child(mi)
+
+	# Detection shape (slightly larger than mesh for forgiving pickup)
+	var cs    := CollisionShape3D.new()
+	var shape := SphereShape3D.new()
+	shape.radius = 0.5
+	cs.shape     = shape
+	area.add_child(cs)
+
+	# Signal → collection
+	area.body_entered.connect(_on_pickup_collected.bind(area))
+
+	# TTL auto-destroy
+	var ttl := Timer.new()
+	ttl.wait_time = PICKUP_TTL
+	ttl.one_shot  = true
+	ttl.autostart = true
+	ttl.timeout.connect(area.queue_free)
+	area.add_child(ttl)
+
+
+func _on_pickup_collected(body: Node3D, pickup: Area3D) -> void:
+	if body != player or game_over:
+		return
+	if not pickup.monitoring:
+		return                        # already collected (tween in progress)
+
+	score += pickup_points
+	_update_points_label()
+
+	# Prevent double-collection
+	pickup.set_deferred("monitoring", false)
+
+	# Quick "pop" scale-up then free
+	var tween := pickup.create_tween()
+	tween.tween_property(pickup, "scale", Vector3.ONE * 2.5, 0.12)
+	tween.tween_callback(pickup.queue_free)
+
+
+func _update_points_label() -> void:
+	points_label.text = "Score: %04d" % score
+
+
+func _cleanup_pickups() -> void:
+	for p in get_tree().get_nodes_in_group("pickups"):
+		if p.global_position.z > player.global_position.z + CLEANUP_BEHIND:
+			p.queue_free()
 
 # ══════════════════════════════════════════════════════════════
 #  Game state
@@ -259,6 +376,8 @@ func _cleanup_obstacles() -> void:
 
 func _die() -> void:
 	game_over = true
+	gameover_label.text = "GAME OVER\nTime: %.1f    Score: %04d\nPress  R  to restart" \
+		% [score_time, score]
 	gameover_label.visible = true
 	player.velocity = Vector3.ZERO
 
@@ -271,7 +390,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_tree().reload_current_scene()
 
 # ══════════════════════════════════════════════════════════════
-#  Physics  (movement, collisions, obstacle management)
+#  Physics
 # ══════════════════════════════════════════════════════════════
 
 func _physics_process(delta: float) -> void:
@@ -307,27 +426,25 @@ func _physics_process(delta: float) -> void:
 		_die()
 		return
 
-	# ── obstacle lifecycle ──
+	# ── obstacle & pickup lifecycle ──
 	_try_spawn_obstacles()
 	_cleanup_obstacles()
+	_cleanup_pickups()
 
 # ══════════════════════════════════════════════════════════════
-#  Render frame  (camera, ground scroll, UI)
+#  Render frame
 # ══════════════════════════════════════════════════════════════
 
 func _process(delta: float) -> void:
 	if player == null:
 		return
 
-	# Camera tracks player every render frame for smoothness
 	if camera_rig:
 		camera_rig.global_position = player.global_position
 
-	# Rolling ground: keep ground centred under the player
 	if ground:
 		ground.position.z = player.global_position.z
 
-	# Score ticker
 	if not game_over:
 		score_time += delta
-		score_label.text = "Time: %.1f" % score_time
+		time_label.text = "Time: %.1f" % score_time
